@@ -1,0 +1,67 @@
+import json
+import sys
+from typing import TypedDict
+
+from langgraph.graph import END, StateGraph
+
+from agents import monitor, sentiment, supervisor
+from lib import trace
+
+MAX_STEPS = 8
+
+
+class State(TypedDict):
+    restaurant_id: int
+    findings: dict
+    steps: int
+    next: str
+    instruction: str
+
+
+def supervisor_node(state):
+    try:
+        d = supervisor.decide(state["restaurant_id"], state["findings"], state["steps"])
+    except Exception as e:
+        d = supervisor.Decision(next="finish", reason=f"supervisor error: {e}")
+    nxt = "finish" if state["steps"] >= MAX_STEPS else d.next
+    trace.log("supervisor", nxt, {"instruction": d.instruction}, d.reason)
+    return {"next": nxt, "instruction": d.instruction, "steps": state["steps"] + 1}
+
+
+def make_worker(name, module):
+    def node(state):
+        result = module.run(state["restaurant_id"], state["instruction"])
+        trace.log(name, "supervisor", result, "result")
+        findings = dict(state["findings"])
+        findings.setdefault(name, []).append(result)
+        return {"findings": findings}
+
+    return node
+
+
+def build():
+    g = StateGraph(State)
+    g.add_node("supervisor", supervisor_node)
+    g.add_node("monitor", make_worker("monitor", monitor))
+    g.add_node("sentiment", make_worker("sentiment", sentiment))
+    g.set_entry_point("supervisor")
+    g.add_conditional_edges(
+        "supervisor",
+        lambda s: END if s["next"] == "finish" else s["next"],
+        {"monitor": "monitor", "sentiment": "sentiment", END: END},
+    )
+    g.add_edge("monitor", "supervisor")
+    g.add_edge("sentiment", "supervisor")
+    return g.compile()
+
+
+def run(restaurant_id):
+    trace.new_run()
+    return build().invoke(
+        {"restaurant_id": restaurant_id, "findings": {}, "steps": 0, "next": "", "instruction": ""}
+    )
+
+
+if __name__ == "__main__":
+    out = run(int(sys.argv[1]))
+    print(json.dumps(out["findings"], indent=2))
