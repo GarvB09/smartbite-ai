@@ -1,5 +1,6 @@
 from langchain_core.tools import tool
 
+from tools import alerts as _alerts
 from tools import penalties as _penalties
 from tools import prices as _prices
 from tools import reviews as _reviews
@@ -27,3 +28,8 @@ def get_price_drift(restaurant_id: int) -> dict:
 def set_penalty(restaurant_id: int, value: float, reason: str) -> dict:
     """Apply a recommendation score penalty (0.1 to 0.8) to a restaurant with a short reason."""
     return _penalties.set_penalty(restaurant_id, value, reason)
+
+@tool
+def save_alert_draft(restaurant_id: int, audience: str, draft: str) -> dict:
+    """Save a pending alert draft for human approval. audience is 'owner' or 'customers'."""
+    return _alerts.save_alert_draft(restaurant_id, audience, draft)

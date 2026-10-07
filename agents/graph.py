@@ -4,7 +4,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from agents import monitor, sentiment, supervisor
+from agents import alert, monitor, sentiment, supervisor
 from lib import trace
 
 MAX_STEPS = 8
@@ -30,7 +30,13 @@ def supervisor_node(state):
 
 def make_worker(name, module):
     def node(state):
-        result = module.run(state["restaurant_id"], state["instruction"])
+        try:
+            if name == "alert":
+                result = module.run(state["restaurant_id"], state["instruction"], state["findings"])
+            else:
+                result = module.run(state["restaurant_id"], state["instruction"])
+        except Exception as e:
+            result = {"error": f"{type(e).__name__}: {e}"}
         trace.log(name, "supervisor", result, "result")
         findings = dict(state["findings"])
         findings.setdefault(name, []).append(result)
@@ -44,14 +50,16 @@ def build():
     g.add_node("supervisor", supervisor_node)
     g.add_node("monitor", make_worker("monitor", monitor))
     g.add_node("sentiment", make_worker("sentiment", sentiment))
+    g.add_node("alert", make_worker("alert", alert))
     g.set_entry_point("supervisor")
     g.add_conditional_edges(
         "supervisor",
         lambda s: END if s["next"] == "finish" else s["next"],
-        {"monitor": "monitor", "sentiment": "sentiment", END: END},
+        {"monitor": "monitor", "sentiment": "sentiment", "alert": "alert", END: END},
     )
     g.add_edge("monitor", "supervisor")
     g.add_edge("sentiment", "supervisor")
+    g.add_edge("alert", "supervisor")
     return g.compile()
 
 
