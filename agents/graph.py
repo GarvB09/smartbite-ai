@@ -6,6 +6,7 @@ from langgraph.graph import END, StateGraph
 
 from agents import alert, monitor, sentiment, supervisor
 from lib import trace
+from lib.db import get_conn
 
 MAX_STEPS = 8
 
@@ -64,6 +65,11 @@ def build():
 
 
 def run(restaurant_id):
+    conn = get_conn()
+    exists = conn.execute("SELECT 1 FROM restaurants WHERE id=?", (restaurant_id,)).fetchone()
+    conn.close()
+    if not exists:
+        raise ValueError(f"unknown restaurant id {restaurant_id}")
     trace.new_run()
     return build().invoke(
         {"restaurant_id": restaurant_id, "findings": {}, "steps": 0, "next": "", "instruction": ""}
