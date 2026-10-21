@@ -4,6 +4,8 @@
 Flexi CA3 · Symbiosis Institute of Technology · CSE A · Batch 2023-27  
 Team: Garv Bhalla (23070122092), Gayatri Patil (23070122096), Jeel Patel (23070122110), Jiya Tyagi (23070122111)
 
+**Live Demo:** [SmartBite AI](https://smartbite-ai-ugzsqyxzva3vblrwvbz6pg.streamlit.app/)
+
 ---
 
 ## What This Is
