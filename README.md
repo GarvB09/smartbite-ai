@@ -4,6 +4,8 @@
 Flexi CA3 · Symbiosis Institute of Technology · CSE A · Batch 2023-27  
 Team: Garv Bhalla (23070122092), Gayatri Patil (23070122096), Jeel Patel (23070122110), Jiya Tyagi (23070122111)
 
+**Live Demo:** [SmartBite AI](https://smartbite-ai-ugzsqyxzva3vblrwvbz6pg.streamlit.app/)
+
 ---
 
 ## What This Is
@@ -241,3 +243,17 @@ Note: `data/seed.db` must be committed to the repo for the deployed app to have 
 | E — Documentation | 5 | This README + DESIGN.md + in-code docstrings |
 | F — Code Review | 5 | Clean separation: agents/, tools/, lib/; pytest; SOLID principles |
 | G — Individual Contributions | 5 | GitHub commits per member; DESIGN.md contribution table |
+
+
+## Deployment Troubleshooting
+
+- **App fails to start:** Check the Streamlit app logs for missing dependencies or Python errors.
+- **Groq API errors:** Verify that `GROQ_API_KEY` is configured in Streamlit Community Cloud under Advanced settings → Secrets.
+- **Missing database:** Ensure `data/seed.db` is included in the repository and that the application initializes its database correctly.
+- **Dependency installation fails:** Check `requirements.txt` for valid package names and compatible versions.
+- **Changes aren't visible:** Confirm the changes were committed to the deployed branch and check the app's deployment status.
+
+### Live Application
+
+Try the deployed application: [SmartBite AI](https://smartbite-ai-ugzsqyxzva3vblrwvbz6pg.streamlit.app/).
+
