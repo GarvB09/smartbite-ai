@@ -1,7 +1,7 @@
 # SmartBite AI — System Design Document
 
-**CA3 · Multi-Agent AI · Symbiosis Institute of Technology**  
-**Team:** Jeel Patel (23070122110) · Ishan Sinha (23070122106) · Jayant Puri (23070122109) · Jiya Tyagi (23070122111)
+** Flexi CA3 · Multi-Agent AI · Symbiosis Institute of Technology**  
+**Team:** Garv Bhalla (23070122092) · Gayatri Patil (23070122096) · Jeel Patel (23070122110) · Jiya Tyagi (23070122111)
 
 ---
 
@@ -174,7 +174,7 @@ The Streamlit "Agent Trace" tab renders all runs and individual messages. Sample
 
 | Member | Role | Contribution |
 |--------|------|-------------|
-| Ishan Sinha (23070122106) | Core infrastructure | `lib/` (db, llm, trace), `tools/` (reviews, prices, penalties, alerts, lc_tools), `agents/base.py`, `data/` pipeline, `simulator.py` |
-| Jayant Puri (23070122109) | Worker agents | `agents/monitor.py` (Agent 2), `agents/sentiment.py` (Agent 4), `agents/alert.py` (Agent 5), `tests/test_core.py` |
-| Jeel Patel (23070122110) | Orchestration + UI | `agents/supervisor.py`, `agents/graph.py` (5-agent wiring), `app.py` (Recommendation tab, Quality tab, Alerts tab, Trace tab) |
-| Jiya Tyagi (23070122111) | Recommendation system | `agents/recommendation.py` (Agent 1), `agents/price.py` (Agent 3), `tools/recommender.py` (TF-IDF + penalty scoring), `tests/test_agents.py`, documentation |
+| Garv Bhalla (23070122092) | Core infrastructure | `lib/` (db, llm, trace), `tools/` (reviews, prices, penalties, alerts), `agents/base.py`, `data/` pipeline, `simulator.py` |
+| Gayatri Patil (23070122096) | Worker agents | `agents/monitor.py` (Agent 2), `agents/sentiment.py` (Agent 4), `agents/alert.py` (Agent 5), `tests/test_core.py` |
+| Jeel Patel (23070122110) | Orchestration + UI | `agents/supervisor.py`, `agents/graph.py` (5-agent wiring), `app.py`, `tools/lc_tools.py` |
+| Jiya Tyagi (23070122111) | Recommendation system | `agents/recommendation.py` (Agent 1), `agents/price.py` (Agent 3), `tools/recommender.py`, `tests/test_agents.py`, documentation |

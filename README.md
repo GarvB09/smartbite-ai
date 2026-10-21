@@ -1,8 +1,8 @@
 # SmartBite AI
 
 **Multi-Agent Restaurant Intelligence Platform**  
-CA3 Submission · Symbiosis Institute of Technology · AI-1 · Batch 2023-27  
-Team: Jeel Patel (23070122110), Ishan Sinha (23070122106), Jayant Puri (23070122109), Jiya Tyagi (23070122111)
+Flexi CA3 · Symbiosis Institute of Technology · CSE A · Batch 2023-27  
+Team: Garv Bhalla (23070122092), Gayatri Patil (23070122096), Jeel Patel (23070122110), Jiya Tyagi (23070122111)
 
 ---
 
