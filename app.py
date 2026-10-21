@@ -12,7 +12,10 @@ Tabs:
 import html
 import json
 import os
+import logging
 import shutil
+import sys
+import time
 
 import pandas as pd
 import streamlit as st
@@ -23,6 +26,15 @@ from lib import trace
 from lib.db import DB_PATH, get_conn, init_db
 from tools import alerts, penalties, recommender
 from tools.reviews import get_rating_trend
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+log = logging.getLogger("smartbite")
+UNAVAILABLE = "Currently unavailable"
 
 st.set_page_config(page_title="SmartBite AI", page_icon="🍽️", layout="wide")
 
@@ -63,6 +75,30 @@ def read_trace(run_id):
     return [r for r in recs if r["run_id"] == run_id]
 
 
+def rate_limited(run_id):
+    """True if this run was cut short by an LLM provider rate limit (HTTP 429)."""
+    return any(
+        "rate limit" in json.dumps(r, default=str).lower() or "429" in str(r.get("reason", ""))
+        for r in read_trace(run_id)
+    )
+
+
+def run_graph(status, **kwargs):
+    """graph.run with the same arguments, retried when the free-tier token-per-minute
+    limit ends the run early. Returns (output, rate_limited_after_all_retries)."""
+    for attempt in range(3):
+        out = graph.run(**kwargs)
+        limited = rate_limited(trace._run["id"])
+        if not limited:
+            return out, False
+        if attempt < 2:
+            for left in range(25, 0, -1):
+                status.update(label=f"Rate limit reached — retrying in {left}s (attempt {attempt + 2} of 3)…")
+                time.sleep(1)
+            status.update(label="Retrying…")
+    return out, True
+
+
 # ── Load data ─────────────────────────────────────────────────────────
 
 restaurants = q("SELECT id, name, cuisine, city, rating FROM restaurants ORDER BY id")
@@ -74,26 +110,109 @@ if not restaurants:
 
 rest_by_id = {r["id"]: r for r in restaurants}
 
+ALL_AREAS = "All areas"
+DEFAULT_CITY = "Bengaluru"
+
+
+def city_of(raw):
+    """The `city` column holds a locality. Data for other cities is written "Locality, City"
+    (e.g. "Koregaon Park, Pune"); a bare locality belongs to the original Bengaluru dataset."""
+    return raw.rsplit(",", 1)[1].strip() if "," in raw else DEFAULT_CITY
+
+
+def area_of(raw):
+    """Locality within its city; Koramangala's numbered blocks are grouped into one area."""
+    loc_ = raw.rsplit(",", 1)[0].strip() if "," in raw else raw
+    return "Koramangala" if loc_.startswith("Koramangala") else loc_
+
+
+_city_counts, _area_counts = {}, {}
+for _r in restaurants:
+    _c, _a = city_of(_r["city"]), area_of(_r["city"])
+    _city_counts[_c] = _city_counts.get(_c, 0) + 1
+    _area_counts[(_c, _a)] = _area_counts.get((_c, _a), 0) + 1
+CITIES = sorted(_city_counts, key=lambda c: (-_city_counts[c], c))
+
+
+def areas_for(city):
+    names = sorted((a for (c, a) in _area_counts if c == city), key=lambda a: (-_area_counts[(city, a)], a))
+    return [ALL_AREAS] + names
+
+
+def in_area(restaurant_id, city, area):
+    r = rest_by_id.get(restaurant_id)
+    return (r is not None and city_of(r["city"]) == city
+            and (area == ALL_AREAS or area_of(r["city"]) == area))
+
+
+def rec_id(rec):
+    """Restaurant id of an Agent 1 recommendation (the LLM may echo it as id or restaurant_id)."""
+    rid_ = rec.get("restaurant_id", rec.get("id"))
+    if rid_ in rest_by_id:
+        return rid_
+    return next((r["id"] for r in restaurants if r["name"] == rec.get("name")), None)
+
+
+def select_for_check(restaurant_id):
+    st.session_state["rid_pick"] = restaurant_id
+    st.toast(f"{rest_by_id[restaurant_id]['name']} selected — open the Quality check tab.")
+
 
 # ── Styling & UI helpers ──────────────────────────────────────────────
 
 st.markdown(
     """
     <style>
-    .sb-hero {background: linear-gradient(135deg,#ff7a45 0%,#d4380d 100%);
-              padding: 1.6rem 2rem; border-radius: 16px; color: #fff; margin-bottom: 1.2rem;}
-    .sb-hero h1 {margin: 0; font-size: 2.2rem; color: #fff; padding: 0;}
-    .sb-hero p  {margin: .3rem 0 0 0; font-size: 1.05rem; opacity: .92;}
-    .sb-name  {font-size: 1.35rem; font-weight: 700; margin: 0;}
-    .sb-sub   {color: #8c8c8c; font-size: .9rem; margin-bottom: .4rem;}
-    .sb-stars {font-size: 1.15rem; letter-spacing: 2px;}
-    .sb-badge {display:inline-block; padding: 2px 10px; border-radius: 999px;
-               font-size: .78rem; font-weight: 700; color: #fff;}
-    .sb-red {background:#cf1322;} .sb-orange {background:#fa8c16;}
-    .sb-green {background:#389e0d;} .sb-gray {background:#8c8c8c;}
-    .sb-draft {background: rgba(128,128,128,.12); border-left: 4px solid #fa8c16;
-               padding: .8rem 1rem; border-radius: 6px; margin: .5rem 0;}
-    .sb-step  {border-left: 3px solid #d9d9d9; padding: .2rem 0 .6rem 1rem; margin-left: .4rem;}
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap');
+    :root {--ink:#1f1a17; --muted:#6f655d; --line:#e0d5c4; --accent:#b4401f;
+           --ok:#3f6b3a; --warn:#9a6a14; --bad:#a52a1f;}
+    html, body, .stApp, button, input, textarea {font-family: 'Inter', system-ui, sans-serif;}
+    h1, h2, h3, .stApp h1, .stApp h2, .stApp h3, .sb-wordmark, .sb-name {font-family: 'Fraunces', Georgia, serif; letter-spacing: -.01em;}
+    h2, h3 {font-weight: 600;}
+    .block-container {padding-top: 4rem; max-width: 1100px;}
+
+    .sb-hero {display:flex; justify-content:space-between; align-items:flex-end; gap:2rem; flex-wrap:wrap;
+              border-bottom: 1px solid var(--ink); padding-bottom: 1rem; margin-bottom: 1.4rem;}
+    .sb-wordmark {font-size: 3rem; line-height: 1.15; font-weight: 600; margin: 0;}
+    .sb-wordmark em {color: var(--accent); font-style: italic;}
+    .sb-tag {color: var(--muted); margin: .5rem 0 0 0; font-size: 1.02rem; max-width: 34rem;}
+    .sb-meta {color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .12em; text-align: right;}
+
+    .sb-name  {font-size: 1.3rem; font-weight: 600; margin: 0; line-height: 1.25;}
+    .sb-sub   {color: var(--muted); font-size: .88rem; margin: .1rem 0 .5rem 0;}
+    .sb-stars {color: var(--accent); font-size: 1.1rem; letter-spacing: 3px;}
+    .sb-stars i {font-style: normal; color: var(--line);}
+
+    .sb-badge {display:inline-flex; align-items:center; gap:.4rem; font-size:.7rem; font-weight:600;
+               text-transform:uppercase; letter-spacing:.08em; margin-left:.4rem; vertical-align:middle;}
+    .sb-badge::before {content:""; width:.55rem; height:.55rem; border-radius:50%; background:currentColor;}
+    .sb-red {color: var(--bad);} .sb-orange {color: var(--warn);}
+    .sb-green {color: var(--ok);} .sb-gray {color: var(--muted);}
+
+    .sb-draft {border-left: 2px solid var(--accent); padding: .3rem 0 .3rem 1rem; margin: .6rem 0 .9rem 0;
+               line-height: 1.55;}
+    .sb-step  {border-left: 1px solid var(--line); padding: .1rem 0 1.1rem 1.2rem; margin-left: .35rem;
+               position: relative; line-height: 1.5;}
+    .sb-step::before {content:""; position:absolute; left:-.3rem; top:.45rem; width:.6rem; height:.6rem;
+                      border-radius:50%; background: var(--ink);}
+
+    .sb-rise {animation: sb-rise .35s ease-out both;}
+    @keyframes sb-rise {from {opacity:0; transform: translateY(6px);} to {opacity:1; transform:none;}}
+
+    .stTabs [data-baseweb="tab-list"] {gap: 1.6rem; border-bottom: 1px solid var(--line);}
+    .stTabs [data-baseweb="tab"] {padding: .6rem 0; transition: color .15s ease;}
+    .stButton > button {border-radius: 4px; font-weight: 600; transition: background .15s ease, border-color .15s ease, transform .1s ease;}
+    .stButton > button:active {transform: translateY(1px);}
+    .stButton > button:focus-visible, input:focus-visible {outline: 2px solid var(--accent); outline-offset: 2px;}
+    [data-testid="stSidebar"] {border-right: 1px solid var(--line);}
+
+    @media (max-width: 640px) {
+        .sb-wordmark {font-size: 2.2rem;} .sb-meta {text-align:left;}
+        .stButton > button {min-height: 44px;}
+    }
+    @media (prefers-reduced-motion: reduce) {
+        * {animation: none !important; transition: none !important;}
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -112,7 +231,7 @@ def stars(score, out_of=5):
         return ""
     filled = round(score * out_of) if score <= 1 else round(min(score, out_of))
     filled = max(0, min(out_of, filled))
-    return "⭐" * filled + "☆" * (out_of - filled)
+    return "★" * filled + "<i>" + "★" * (out_of - filled) + "</i>"
 
 
 SEVERITY = {
@@ -137,7 +256,8 @@ def pct_txt(x):
 def agent_step(num, title, item):
     """One timeline step in plain English for a single agent's finding."""
     if item.get("error"):
-        return title, badge("ERROR", "red"), f"This agent failed: {item['error']}"
+        log.warning("agent %s error: %s", title, item["error"])
+        return title, badge("UNAVAILABLE", "gray"), UNAVAILABLE
     if num == 2:  # monitor
         sev_txt, sev_col = SEVERITY.get(str(item.get("severity", "")).lower(), ("NO SEVERITY", "gray"))
         if item.get("drop"):
@@ -173,17 +293,17 @@ def _esc(step):
 # ── Sidebar ───────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/restaurant.png", width=60)
-    st.title("SmartBite AI")
-    st.caption("5-agent restaurant intelligence platform")
+    st.markdown('<p class="sb-wordmark" style="font-size:1.7rem">SmartBite <em>AI</em></p>', unsafe_allow_html=True)
+    st.caption("Restaurant intelligence, five agents deep")
     st.divider()
 
-    st.subheader("🍽️ Restaurant")
+    st.subheader("Restaurant")
     rid = st.selectbox(
         "Search restaurant",
         [r["id"] for r in restaurants],
         format_func=lambda i: rest_by_id[i]["name"],
         placeholder="Type a restaurant name…",
+        key="rid_pick",
     )
     row = rest_by_id[rid]
     st.caption(f"{row['cuisine']} · {row['city']}")
@@ -195,7 +315,7 @@ with st.sidebar:
               help="Applied by Agent 4 (Sentiment). Lowers recommendation rank.")
 
     st.divider()
-    st.subheader("👤 User")
+    st.subheader("User")
     uid = st.selectbox(
         "Select user",
         [u["id"] for u in users],
@@ -205,7 +325,7 @@ with st.sidebar:
     st.caption(f"Favourite cuisines: **{u['favorite_cuisines']}**")
 
     st.divider()
-    st.subheader("🧪 Simulate incident")
+    st.subheader("Simulate incident")
     n = st.slider("Bad reviews to inject", 1, 20, 8)
     col1, col2 = st.columns(2)
     with col1:
@@ -227,18 +347,20 @@ with st.sidebar:
 # ── Hero header ───────────────────────────────────────────────────────
 
 st.markdown(
-    '<div class="sb-hero"><h1>🍽️ SmartBite AI</h1>'
-    "<p>Five cooperating AI agents that recommend great food — and watch restaurant quality so you don't have to.</p></div>",
+    '<header class="sb-hero"><div>'
+    '<div class="sb-wordmark">SmartBite <em>AI</em></div>'
+    '<p class="sb-tag">Find somewhere good to eat — and know when a favourite has quietly stopped being one.</p>'
+    '</div><div class="sb-meta">Five agents<br>Every alert human-approved</div></header>',
     unsafe_allow_html=True,
 )
 
 # ── Tabs ──────────────────────────────────────────────────────────────
 
 tab_rec, tab_quality, tab_alerts, tab_trace = st.tabs([
-    "🤖 Recommendations (Agent 1)",
-    "📊 Quality Check (Agents 2–5)",
-    "🔔 Alerts (Human Approval)",
-    "📋 Agent Trace",
+    "Recommendations",
+    "Quality check",
+    "Alerts",
+    "Agent trace",
 ])
 
 
@@ -254,32 +376,85 @@ with tab_rec:
 
     query = st.text_input(
         "What are you in the mood for?",
-        placeholder="e.g. cheap Indian food near me, spicy biryani under 300",
+        placeholder="e.g. cheap Indian food, spicy biryani under 300",
     )
+    if len(CITIES) > 1:
+        ccol, acol = st.columns(2)
+        with ccol:
+            city_sel = st.selectbox(
+                "City", CITIES, key="city_pick",
+                format_func=lambda c: f"{c} ({_city_counts[c]} places)",
+            )
+    else:  # single-city data (Bengaluru): no city choice to make
+        city_sel = CITIES[0]
+        acol = st.container()
+    with acol:
+        area_sel = st.selectbox(
+            f"Area in {city_sel}", areas_for(city_sel), key=f"area_pick_{city_sel}",
+            format_func=lambda a: a if a == ALL_AREAS else f"{a} ({_area_counts[(city_sel, a)]} places)",
+        )
+    loc = city_sel if area_sel == ALL_AREAS else f"{area_sel}, {city_sel}"
+    narrowed = area_sel != ALL_AREAS or len(CITIES) > 1
+
+    base_query = query or "show me good restaurants"
+    agent_query = f"{base_query} in {area_sel if area_sel != ALL_AREAS else city_sel}" if narrowed else base_query
 
     if st.button("▶ Get Recommendations", type="primary"):
-        with st.spinner("Agent 1 working — fetching profile and recommendations…"):
+        with st.status("Agent 1 working — fetching profile and recommendations…") as status:
             try:
-                out = graph.run(user_id=uid, query=query or "show me good restaurants")
+                out, limited = run_graph(status, user_id=uid, query=agent_query)
+                found = (out["findings"].get("recommendation") or [{}])[0]
+                agent_recs = [] if found.get("error") else found.get("recommendations", [])
+                final = [r for r in agent_recs if in_area(rec_id(r), city_sel, area_sel)]
+                for r in final:
+                    r["restaurant_id"] = rec_id(r)
+                added = 0
+                if len(final) < 3:
+                    # Agent 1's top picks had too few places in this area: top up from the same recommender.
+                    have = {r["restaurant_id"] for r in final}
+                    for r in recommender.recommend(uid, agent_query, len(restaurants)):
+                        if len(final) >= 5:
+                            break
+                        if r["restaurant_id"] not in have and in_area(r["restaurant_id"], city_sel, area_sel):
+                            final.append(dict(r, added=True))
+                            added += 1
                 st.session_state["rec_result"] = {
                     "uid": uid,
                     "findings": out["findings"],
                     "run_id": trace._run["id"],
+                    "rate_limited": limited,
+                    "location": loc,
+                    "city": city_sel,
+                    "final_recs": final,
+                    "added": added,
+                    "top_dropped": bool(agent_recs) and rec_id(agent_recs[0]) not in {r["restaurant_id"] for r in final},
                 }
+                status.update(label="Done" if not limited else "Stopped by rate limit", state="complete")
                 recommender._state.clear()
             except Exception as e:
-                st.error(f"Agent 1 failed: {e}")
+                status.update(label="Failed", state="error")
+                log.exception("Agent 1 failed")
+                st.warning(f"Recommendations are {UNAVAILABLE.lower()}. Please try again in a moment.")
 
     res = st.session_state.get("rec_result")
     if res and res["uid"] == uid:
         findings = res["findings"].get("recommendation", [])
+        if res.get("rate_limited"):
+            st.warning("The AI provider's rate limit stopped this request. Wait about a minute and try again.")
         if findings and not findings[0].get("error"):
             f = findings[0]
             st.subheader("Agent 1 findings")
             st.info(f"**Query understood as:** {f.get('query_interpreted', query)}")
-            st.success(f.get("explanation", ""))
+            if res.get("top_dropped"):
+                st.caption(f"Agent 1's top pick is outside {res['location']}, so its write-up is omitted.")
+            else:
+                st.success(f.get("explanation", ""))
 
-            recs = f.get("recommendations", [])
+            recs = res.get("final_recs", [])
+            if res.get("location"):
+                st.caption(f"Showing places in **{res['location']}** only."
+                           + (f" {res['added']} added from the recommender because Agent 1's top picks had too few here."
+                              if res.get("added") else ""))
             if recs:
                 st.subheader(f"Top {len(recs)} recommendations")
                 for i, r in enumerate(recs, 1):
@@ -294,19 +469,25 @@ with tab_rec:
                             if r.get("reasons"):
                                 st.success("Why this pick: " + " · ".join(r["reasons"]))
                         with c2:
-                            st.markdown(f'<div class="sb-stars">{stars(r.get("rating", 0))}</div>',
+                            st.markdown(f'<div class="sb-stars" role="img" aria-label="Rated {r.get("rating")} out of 5">{stars(r.get("rating", 0))}</div>',
                                         unsafe_allow_html=True)
                             st.caption(f"Rated {r.get('rating')} · match score {r.get('score')}")
                             if r.get("penalty", 0) > 0:
                                 st.warning(f"⚠️ Quality penalty: {r['penalty']:.2f}")
+                            st.button("Check quality →", key=f"chk{r['restaurant_id']}",
+                                      on_click=select_for_check, args=(r["restaurant_id"],),
+                                      use_container_width=True)
             else:
-                st.warning("No recommendations returned.")
+                st.warning("No recommendations returned for this area. Try another location or request.")
         elif findings and findings[0].get("error"):
-            st.error(f"Agent error: {findings[0]['error']}")
+            log.warning("agent 1 error: %s", findings[0]["error"])
+            st.warning(f"Recommendations are {UNAVAILABLE.lower()}. Please try again in a moment.")
 
     # Also show plain recommender without agent for comparison
     with st.expander("📋 Raw recommender output (without Agent 1 reasoning)"):
-        plain = recommender.recommend(uid, query or None, 8)
+        plain = [r for r in recommender.recommend(uid, agent_query if (query or narrowed) else None,
+                                                  len(restaurants))
+                 if in_area(r["restaurant_id"], city_sel, area_sel)][:8]
         st.dataframe(pd.DataFrame(plain), use_container_width=True)
         st.caption("Agent 4's penalties are reflected in the score column above.")
 
@@ -332,23 +513,94 @@ with tab_quality:
         else:
             st.success("No active penalty on this restaurant.")
 
-    if st.button("▶ Run quality check (Agents 2–5)", type="primary"):
-        with st.spinner("Agents 2–5 working — monitoring, pricing, sentiment, alerting…"):
-            try:
-                out = graph.run(restaurant_id=rid)
-                st.session_state["quality_result"] = {
-                    "rid": rid,
-                    "findings": out["findings"],
-                    "run_id": trace._run["id"],
-                }
-                recommender._state.clear()
-            except Exception as e:
-                st.error(f"Run failed: {e}")
+    qresults = st.session_state.setdefault("quality_results", {})
+    rec_res = st.session_state.get("rec_result")
+    rec_ids = [r["restaurant_id"] for r in rec_res.get("final_recs", [])] if rec_res and rec_res["uid"] == uid else []
 
-    res = st.session_state.get("quality_result")
-    if res and res["rid"] == rid:
+    def check_one(status, restaurant_id):
+        out, limited = run_graph(status, restaurant_id=restaurant_id)
+        qresults[restaurant_id] = {
+            "rid": restaurant_id,
+            "findings": out["findings"],
+            "run_id": trace._run["id"],
+            "rate_limited": limited,
+        }
+        recommender._state.clear()
+        return limited
+
+    if rid in rec_ids:
+        st.caption(f"This is #{rec_ids.index(rid) + 1} in your recommendations.")
+
+    b1, b2 = st.columns([1, 1])
+    with b1:
+        run_one = st.button("▶ Run quality check (Agents 2–5)", type="primary", use_container_width=True)
+    with b2:
+        run_all = st.button(f"Check all {len(rec_ids)} recommended restaurants", use_container_width=True,
+                            disabled=not rec_ids,
+                            help="Runs Agents 2–5 on exactly the restaurants Agent 1 recommended."
+                            if rec_ids else "Get recommendations first (Recommendations tab).")
+
+    ran_ok = False
+    if run_one:
+        with st.status("Agents 2–5 working — monitoring, pricing, sentiment, alerting…") as status:
+            try:
+                limited = check_one(status, rid)
+                status.update(label="Done" if not limited else "Stopped by rate limit", state="complete")
+                ran_ok = True
+            except Exception as e:
+                status.update(label="Failed", state="error")
+                log.exception("Quality check failed")
+                st.warning(f"Quality check is {UNAVAILABLE.lower()} for this restaurant. Please try again in a moment.")
+        if ran_ok:
+            st.rerun()  # redraw so the sidebar's Active penalty reflects what Agent 4 just wrote
+
+    if run_all:
+        failed = []
+        with st.status("Checking recommended restaurants…", expanded=True) as status:
+            for n_, rid_ in enumerate(rec_ids, 1):
+                st.write(f"{n_}/{len(rec_ids)} · {rest_name(rid_)}")
+                try:
+                    check_one(status, rid_)
+                except Exception as e:
+                    log.exception("Quality check failed for %s", rest_name(rid_))
+                    failed.append(rest_name(rid_))
+            status.update(label=f"Checked {len(rec_ids)} recommended restaurants", state="complete")
+        st.session_state["check_failures"] = failed
+        st.rerun()  # redraw so the sidebar's Active penalty reflects what Agent 4 just wrote
+
+    for name_ in st.session_state.get("check_failures", []):
+        st.warning(f"{name_}: {UNAVAILABLE.lower()}")
+
+    done = [i for i in rec_ids if i in qresults]
+    if done:
+        st.subheader("Your recommended restaurants")
+
+        def one_line(i, key, field):
+            items = qresults[i]["findings"].get(key) or []
+            return (items[0].get(field) if items and not items[0].get("error") else "—") if items else "—"
+
+        st.dataframe(pd.DataFrame([
+            {
+                "restaurant": rest_name(i),
+                "rating drop": one_line(i, "monitor", "severity"),
+                "price drift %": one_line(i, "price", "drift_pct"),
+                "sentiment": one_line(i, "sentiment", "sentiment"),
+                "alert drafted": "yes" if one_line(i, "alert", "alert_drafted") is True else "no",
+            }
+            for i in done
+        ]), use_container_width=True, hide_index=True)
+
+    res = qresults.get(rid)
+    if res:
         st.subheader("Agent findings")
         findings = res["findings"]
+        limited = res.get("rate_limited", False)
+        if limited:
+            st.warning(
+                "The AI provider's free-tier rate limit (tokens per minute) stopped this run early, "
+                "even after retrying. Agents marked “Not reached” did not get a turn — wait about a minute "
+                "and run the check again."
+            )
 
         # Step-by-step timeline of what each agent found
         agent_names = [
@@ -361,14 +613,15 @@ with tab_quality:
             items = findings.get(key, [])
             if not items:
                 st.markdown(
-                    f'<div class="sb-step"><b>{label}</b> {badge("NOT RUN", "gray")}'
-                    "<br>The supervisor did not need this agent for this restaurant.</div>",
+                    f'<div class="sb-step sb-rise"><b>{label}</b> {badge("NOT REACHED" if limited else "NOT RUN", "gray")}'
+                    "<br>" + ("The run was cut short before this agent could start." if limited
+                          else "The supervisor did not need this agent for this restaurant.") + "</div>",
                     unsafe_allow_html=True,
                 )
             for item in items:
                 title, tag, text = _esc(agent_step(num, label, item))
                 st.markdown(
-                    f'<div class="sb-step"><b>{title}</b> {tag}<br>{text}</div>',
+                    f'<div class="sb-step sb-rise"><b>{title}</b> {tag}<br>{text}</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -408,11 +661,17 @@ with tab_alerts:
         n_pending = sum(1 for a in pending if a["status"] == "pending")
         st.caption(f"{len(pending)} alert(s) in queue · {n_pending} awaiting review")
         status_badge = {
-            "pending":  ("🔴 Urgent — awaiting review", "red"),
-            "approved": ("🟢 Approved", "green"),
-            "rejected": ("⚪ Rejected", "gray"),
+            "pending":  ("Urgent · awaiting review", "red"),
+            "approved": ("Approved", "green"),
+            "rejected": ("Rejected", "gray"),
         }
-        for a in pending:
+        view = st.radio("Show", ["All", "Awaiting review", "Approved", "Rejected"],
+                        horizontal=True, label_visibility="collapsed")
+        wanted = {"Awaiting review": "pending", "Approved": "approved", "Rejected": "rejected"}.get(view)
+        shown = [a for a in pending if wanted is None or a["status"] == wanted]
+        if not shown:
+            st.info(f"Nothing under “{view}”.")
+        for a in shown:
             label, color = status_badge.get(a["status"], (a["status"], "gray"))
             with st.container(border=True):
                 h1, h2 = st.columns([3, 2])
@@ -424,7 +683,7 @@ with tab_alerts:
                     )
                 with h2:
                     st.markdown(badge(label, color), unsafe_allow_html=True)
-                st.markdown(f'<div class="sb-draft">{html.escape(str(a["draft"]))}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sb-draft sb-rise">{html.escape(str(a["draft"]))}</div>', unsafe_allow_html=True)
                 if a["status"] == "pending":
                     c1, c2, _ = st.columns([1, 1, 4])
                     if c1.button("✅ Approve", key=f"ok{a['id']}", type="primary", use_container_width=True):
