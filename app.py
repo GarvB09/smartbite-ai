@@ -9,6 +9,7 @@ Tabs:
   4. Agent Trace      — Live trace of the last run
 """
 
+import html
 import json
 import os
 import shutil
@@ -71,6 +72,104 @@ if not restaurants:
     st.error("Database is empty. Run `python -m lib.load_data` first.")
     st.stop()
 
+rest_by_id = {r["id"]: r for r in restaurants}
+
+
+# ── Styling & UI helpers ──────────────────────────────────────────────
+
+st.markdown(
+    """
+    <style>
+    .sb-hero {background: linear-gradient(135deg,#ff7a45 0%,#d4380d 100%);
+              padding: 1.6rem 2rem; border-radius: 16px; color: #fff; margin-bottom: 1.2rem;}
+    .sb-hero h1 {margin: 0; font-size: 2.2rem; color: #fff; padding: 0;}
+    .sb-hero p  {margin: .3rem 0 0 0; font-size: 1.05rem; opacity: .92;}
+    .sb-name  {font-size: 1.35rem; font-weight: 700; margin: 0;}
+    .sb-sub   {color: #8c8c8c; font-size: .9rem; margin-bottom: .4rem;}
+    .sb-stars {font-size: 1.15rem; letter-spacing: 2px;}
+    .sb-badge {display:inline-block; padding: 2px 10px; border-radius: 999px;
+               font-size: .78rem; font-weight: 700; color: #fff;}
+    .sb-red {background:#cf1322;} .sb-orange {background:#fa8c16;}
+    .sb-green {background:#389e0d;} .sb-gray {background:#8c8c8c;}
+    .sb-draft {background: rgba(128,128,128,.12); border-left: 4px solid #fa8c16;
+               padding: .8rem 1rem; border-radius: 6px; margin: .5rem 0;}
+    .sb-step  {border-left: 3px solid #d9d9d9; padding: .2rem 0 .6rem 1rem; margin-left: .4rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def badge(text, color):
+    return f'<span class="sb-badge sb-{color}">{text}</span>'
+
+
+def stars(score, out_of=5):
+    """Render a 0-1 score (or 0-5 rating) as filled/empty stars."""
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return ""
+    filled = round(score * out_of) if score <= 1 else round(min(score, out_of))
+    filled = max(0, min(out_of, filled))
+    return "⭐" * filled + "☆" * (out_of - filled)
+
+
+SEVERITY = {
+    "high":   ("HIGH severity", "red"),
+    "medium": ("MEDIUM severity", "orange"),
+    "low":    ("LOW severity", "green"),
+}
+
+
+def rest_name(rid_):
+    r = rest_by_id.get(rid_)
+    return r["name"] if r else f"Restaurant {rid_}"
+
+
+def pct_txt(x):
+    try:
+        return f"{float(x) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def agent_step(num, title, item):
+    """One timeline step in plain English for a single agent's finding."""
+    if item.get("error"):
+        return title, badge("ERROR", "red"), f"This agent failed: {item['error']}"
+    if num == 2:  # monitor
+        sev_txt, sev_col = SEVERITY.get(str(item.get("severity", "")).lower(), ("NO SEVERITY", "gray"))
+        if item.get("drop"):
+            return (title, badge(sev_txt, sev_col),
+                    f"Found a rating drop. {item.get('reason', '')} "
+                    f"(confidence {pct_txt(item.get('confidence'))})")
+        return title, badge("HEALTHY", "green"), f"No meaningful rating drop. {item.get('reason', '')}"
+    if num == 3:  # price
+        drift = item.get("drift_pct")
+        if item.get("significant"):
+            return (title, badge("PRICE CHANGE", "orange"),
+                    f"Menu prices moved {drift}%. {item.get('reason', '')}")
+        return title, badge("STABLE", "green"), f"Prices look stable ({drift}% drift). {item.get('reason', '')}"
+    if num == 4:  # sentiment
+        sent = str(item.get("sentiment", "unknown")).lower()
+        col = {"negative": "red", "neutral": "orange", "positive": "green"}.get(sent, "gray")
+        txt = (f"Review text is {sent} and the trend is {item.get('trend', 'unknown')} "
+               f"(confidence {pct_txt(item.get('confidence'))}).")
+        if item.get("penalty_applied"):
+            txt += f" Applied a ranking penalty of {item['penalty_applied']}."
+        return title, badge(sent.upper(), col), txt
+    # alert
+    if item.get("alert_drafted"):
+        return (title, badge("ALERT DRAFTED", "orange"),
+                f"Drafted alert #{item.get('alert_id')} for human approval. {item.get('summary', '')}")
+    return title, badge("NO ALERT", "green"), item.get("summary") or "No alert was needed."
+
+
+def _esc(step):
+    title, tag, text = step
+    return title, tag, html.escape(str(text))
+
 # ── Sidebar ───────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -80,9 +179,14 @@ with st.sidebar:
     st.divider()
 
     st.subheader("🍽️ Restaurant")
-    labels = {r["id"]: f"{r['id']} · {r['name']} ({r['cuisine']})" for r in restaurants}
-    rid = st.selectbox("Select restaurant", list(labels), format_func=labels.get)
-    row = next(r for r in restaurants if r["id"] == rid)
+    rid = st.selectbox(
+        "Search restaurant",
+        [r["id"] for r in restaurants],
+        format_func=lambda i: rest_by_id[i]["name"],
+        placeholder="Type a restaurant name…",
+    )
+    row = rest_by_id[rid]
+    st.caption(f"{row['cuisine']} · {row['city']}")
     st.metric("Listed rating", row["rating"])
     t = get_rating_trend(rid)
     st.metric("Recent avg (10 reviews)", t["recent_avg"], t["delta"])
@@ -119,6 +223,14 @@ with st.sidebar:
         simulator.change_price(rid, pct)
         st.success(f"Price raised by {pct}% for restaurant {rid}")
 
+
+# ── Hero header ───────────────────────────────────────────────────────
+
+st.markdown(
+    '<div class="sb-hero"><h1>🍽️ SmartBite AI</h1>'
+    "<p>Five cooperating AI agents that recommend great food — and watch restaurant quality so you don't have to.</p></div>",
+    unsafe_allow_html=True,
+)
 
 # ── Tabs ──────────────────────────────────────────────────────────────
 
@@ -171,17 +283,22 @@ with tab_rec:
             if recs:
                 st.subheader(f"Top {len(recs)} recommendations")
                 for i, r in enumerate(recs, 1):
+                    city = rest_by_id.get(r.get("restaurant_id"), {}).get("city", "")
+                    sub = " · ".join(x for x in (r.get("cuisine"), city) if x)
                     with st.container(border=True):
                         c1, c2 = st.columns([3, 1])
                         with c1:
-                            st.markdown(f"**#{i} {r['name']}** — {r['cuisine']}")
+                            st.markdown(f'<p class="sb-name">#{i} {r["name"]}</p>'
+                                        f'<div class="sb-sub">{sub}</div>',
+                                        unsafe_allow_html=True)
                             if r.get("reasons"):
-                                st.caption(" · ".join(r["reasons"]))
+                                st.success("Why this pick: " + " · ".join(r["reasons"]))
                         with c2:
-                            st.metric("Score", round(r["score"], 3))
+                            st.markdown(f'<div class="sb-stars">{stars(r.get("rating", 0))}</div>',
+                                        unsafe_allow_html=True)
+                            st.caption(f"Rated {r.get('rating')} · match score {r.get('score')}")
                             if r.get("penalty", 0) > 0:
-                                st.warning(f"⚠️ Penalty: {r['penalty']:.2f}")
-                            st.caption(f"Rating: {r['rating']}")
+                                st.warning(f"⚠️ Quality penalty: {r['penalty']:.2f}")
             else:
                 st.warning("No recommendations returned.")
         elif findings and findings[0].get("error"):
@@ -207,7 +324,7 @@ with tab_quality:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.info(f"**Selected restaurant:** {row['name']} (id={rid})")
+        st.info(f"**Selected restaurant:** {row['name']} · {row['cuisine']}, {row['city']}")
     with col_b:
         current_pen = penalties.get_penalty(rid)
         if current_pen:
@@ -233,25 +350,27 @@ with tab_quality:
         st.subheader("Agent findings")
         findings = res["findings"]
 
-        # Show each agent's result in its own column
-        cols = st.columns(4)
+        # Step-by-step timeline of what each agent found
         agent_names = [
-            ("monitor",  "Agent 2 — Monitor"),
-            ("price",    "Agent 3 — Price"),
-            ("sentiment","Agent 4 — Sentiment"),
-            ("alert",    "Agent 5 — Alert"),
+            (2, "monitor",  "Agent 2 — Monitor"),
+            (3, "price",    "Agent 3 — Price"),
+            (4, "sentiment","Agent 4 — Sentiment"),
+            (5, "alert",    "Agent 5 — Alert"),
         ]
-        for col, (key, label) in zip(cols, agent_names):
-            with col:
-                st.markdown(f"**{label}**")
-                items = findings.get(key, [])
-                if not items:
-                    st.caption("Not run")
-                for item in items:
-                    if item.get("error"):
-                        st.error(item["error"])
-                    else:
-                        st.json(item)
+        for num, key, label in agent_names:
+            items = findings.get(key, [])
+            if not items:
+                st.markdown(
+                    f'<div class="sb-step"><b>{label}</b> {badge("NOT RUN", "gray")}'
+                    "<br>The supervisor did not need this agent for this restaurant.</div>",
+                    unsafe_allow_html=True,
+                )
+            for item in items:
+                title, tag, text = _esc(agent_step(num, label, item))
+                st.markdown(
+                    f'<div class="sb-step"><b>{title}</b> {tag}<br>{text}</div>',
+                    unsafe_allow_html=True,
+                )
 
         # Trace table
         st.subheader("Agent message trace (this run)")
@@ -286,28 +405,32 @@ with tab_alerts:
     if not pending:
         st.info("No alerts yet. Run a quality check on a restaurant with declining reviews.")
     else:
-        st.caption(f"{len(pending)} alert(s) in queue")
+        n_pending = sum(1 for a in pending if a["status"] == "pending")
+        st.caption(f"{len(pending)} alert(s) in queue · {n_pending} awaiting review")
+        status_badge = {
+            "pending":  ("🔴 Urgent — awaiting review", "red"),
+            "approved": ("🟢 Approved", "green"),
+            "rejected": ("⚪ Rejected", "gray"),
+        }
         for a in pending:
+            label, color = status_badge.get(a["status"], (a["status"], "gray"))
             with st.container(border=True):
-                status_color = {
-                    "pending":  "🟡",
-                    "approved": "🟢",
-                    "rejected": "🔴",
-                }.get(a["status"], "⚪")
-                st.markdown(
-                    f"{status_color} **Alert #{a['id']}** · "
-                    f"Restaurant {a['restaurant_id']} · "
-                    f"Audience: `{a['audience']}` · "
-                    f"Status: `{a['status']}`"
-                )
-                st.write(a["draft"])
-                st.caption(f"Created: {a['created_at']}")
+                h1, h2 = st.columns([3, 2])
+                with h1:
+                    st.markdown(
+                        f'<p class="sb-name">{rest_name(a["restaurant_id"])}</p>'
+                        f'<div class="sb-sub">Alert #{a["id"]} · to {a["audience"]} · {a["created_at"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+                with h2:
+                    st.markdown(badge(label, color), unsafe_allow_html=True)
+                st.markdown(f'<div class="sb-draft">{html.escape(str(a["draft"]))}</div>', unsafe_allow_html=True)
                 if a["status"] == "pending":
-                    c1, c2, _ = st.columns([1, 1, 6])
-                    if c1.button("✅ Approve", key=f"ok{a['id']}"):
+                    c1, c2, _ = st.columns([1, 1, 4])
+                    if c1.button("✅ Approve", key=f"ok{a['id']}", type="primary", use_container_width=True):
                         alerts.set_alert_status(a["id"], "approved")
                         st.rerun()
-                    if c2.button("❌ Reject", key=f"no{a['id']}"):
+                    if c2.button("❌ Reject", key=f"no{a['id']}", use_container_width=True):
                         alerts.set_alert_status(a["id"], "rejected")
                         st.rerun()
 
