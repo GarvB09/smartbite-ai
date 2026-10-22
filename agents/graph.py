@@ -133,11 +133,17 @@ def run(restaurant_id: int = 0, user_id: int = 0, query: str = ""):
         exists = conn.execute(
             "SELECT 1 FROM restaurants WHERE id=?", (restaurant_id,)
         ).fetchone()
-        conn.close()
         if not exists:
+            conn.close()
             raise ValueError(f"unknown restaurant id {restaurant_id}")
-    else:
-        conn.close()
+    if user_id:
+        exists = conn.execute(
+            "SELECT 1 FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if not exists:
+            conn.close()
+            raise ValueError(f"unknown user id {user_id}")
+    conn.close()
 
     trace.new_run()
     return build().invoke({
