@@ -2,6 +2,22 @@ from agents.base import run_agent
 from lib.llm import parse_json
 from tools.lc_tools import get_recommendations, get_user_profile
 
+"""
+Agent 1 — Customer Recommendation Agent
+========================================
+Triggered by the Supervisor in Recommendation or Combined mode.
+
+Workflow:
+  1. Calls get_user_profile to fetch the user's favourite cuisines.
+  2. Calls get_recommendations with the NL query; retries with a broader
+     query if fewer than 3 results are returned.
+  3. Returns structured JSON with a ranked list and a plain-English
+     explanation of the top pick, factoring in any active penalties
+     written by the Sentiment agent.
+"""
+
+
+
 SYSTEM = """You are the Customer Recommendation Agent for SmartBite AI.
 Your job has three steps:
 
