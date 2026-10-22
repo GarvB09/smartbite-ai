@@ -29,6 +29,7 @@ def get_price_drift(restaurant_id: int) -> dict:
 @tool
 def set_penalty(restaurant_id: int, value: float, reason: str) -> dict:
     """Apply a recommendation score penalty (0.1 to 0.8) to a restaurant with a short reason."""
+    value = max(0.1, min(0.8, float(value)))  # clamp to safe range
     return _penalties.set_penalty(restaurant_id, value, reason)
 
 
